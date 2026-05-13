@@ -51,7 +51,6 @@ You can quickly verify your setup with converted pytorch checkpoints from JAX.
 python scripts/generate.py \
   --config ELF-B-owt/ELF-B-owt.yml \
   --elf-checkpoint ELF-B-owt/elf_model.pt \
-  --encoder-checkpoint t5_small_encoder/t5_encoder.pt \
   --batch-size 1 \
   --method ode \
   --steps 64 \
