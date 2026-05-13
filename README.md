@@ -49,19 +49,21 @@ You can quickly verify your setup with converted pytorch checkpoints from JAX.
 
 ```bash
 python scripts/generate.py \
-  --config ELF-B-owt/ELF-B-owt.yml \
-  --elf-checkpoint ELF-B-owt/elf_model.pt \
+  --config <PATH>/ELF-B-owt/ELF-B-owt.yml \
+  --elf-checkpoint <PATH>/ELF-B-owt/elf_model.pt \
   --batch-size 1 \
   --method ode \
   --steps 32 \
   --cfg 1 \
   --self-cond-cfg 3 \
   --sde-gamma 1.5
+# sampling: {'method': 'ode', 'steps': [32], 'cfgs': [1.0], 'self_cond_cfg_scales': [3.0], 'time_schedule': 'logit_normal', 'sde_gamma': 1.5}
+# {"id": 0, "generated": "The Redskins continued to move relatively aggressively—midway to the game when a deep cross by Jacques Andrivsson risen off the net that prevented Sacramento's right-hander Marc Menier to move the ball off the net. (+ 6) The difficulty for the team decreased in the fifth-minute, as a far receiving tackle by Jeymek Ezmanpeas fell off the net and forced Boston back into the middle of the movement. Without the ability to balance the two tackles, Boston's forwards were offered an unusual opportunity to move the ball off the net and the Redskins stopped their movement aggressively too. Boston maintained that strategy with Lewis's first reposte goal in Saturday's 21–2 win over Culi Rothomo. The Redskins managed to establish themselves relatively easily, scoring a deep cross by Jeremy Lewis to create what was Boston's best goal of the season. Burques Weddleland scored the second goal and Stanford's Allahas Cal Vicgot returned for sixth. (+ 6) Despite the attack that saved San Francisco's 2-0, things finally went well for the Redskins, as their goalkeepers Akal Abshan and Jason Acosta defied to their defenses afterecuring the first spot in the MLS series, where they are second tied this season. The game should have bailed off against Madrid, who opened up a rogue 3-0 at Peterron Park. The Redskins would have had the kind of vulnerability of an unfortunate oppositioning team, and 21 movements -- including a cross and a throw -- were postponed this season. The Redskins kept their heads tight before anything even rummed to happen. In the second-half, opposition from a large crowd emerged, but Alex Cloud's rapid crossing goal gave Boston a minor advantage in the spotless-point win in St. City. Unappelled Play The game was marked by two rushes: one outside of the midfield and another outside of the midfield. Boston was unable to protect center Darlin Bergstrandron after hitting the late to rush for the right-hander, while left-back Jeney Hill crunced a header off Sacramento's crossing. Boston did not deserve much of the same, but Hill's size and a flighty farce half-time ensure that Boston had a protecting player's advantage. Media playback is not supported on this device The Detroit Azers' one terrible performance in their 2-0 win over Stanford's Opta was the first Sacramento's won the season. Chris Harrison has not played again for Boston. El State's Chris Harrison is arguably suffering from his deceptive performance but also struggling after Chris Harrison' assists in Saturday's win. Madrid's struggle in Unappeared Comparisons Madrid's struggle was not playable, especially after falling with ground during the losing season. Former Madrid forward Chris Harrison suffered an inappropriate cross tackle to earn his courageous first reposte goal in Madrid's 3-2 win over Culi Rothomo. :-) Media playback is not supported on this device 0:14 Sacramento, above a penalty kick with just 15 seconds left before Boston's Dalton Lewis collected a long ball as his team plumbed to a defying finish (Z Center/span) Although the rehabilitated Redskins have since gone scoreless in their first games of the season, there is little doubt over what Boston's woes remain. Even though it was their first playoff loss in a season since July 2001, it has not been their first of the season. Boston has struggled in the losing of four games, as Madrid has been desperate, yet Alex Cloud's first substitute goal in Boston's 2-0 win over Guantmo State was such a negative effect that Cole left the team on a** his previous injury issues with Madrid. Media playback is not supported on this device Boston's club's response to the Redskins' spotless performance in Saturday's win over St. City by MLS's Steven Culver due to his assessment of the game blam any part of this situation. The club's deceptive performance has had a proportionate advantage between the Redskins and St. City over their last four games in Madrid. By that account, it has been the last one-game loss between these two ill-popular clubs. Media playback is not supported on this device Captain Robinson compares the struggle between Boston's Detroit Azers and the city's Jeymek-Ezmanpeas, who left things nearly without compassion in their 2-0 win over St. City"}
 
 
 python scripts/generate.py \
-  --config ELF-B-xsum/ELF-B-xsum.yml \
-  --elf-checkpoint ELF-B-xsum/elf_model.pt \
+  --config <PATH>/ELF-B-xsum/ELF-B-xsum.yml \
+  --elf-checkpoint <PATH>/ELF-B-xsum/elf_model.pt \
   --encoder-checkpoint t5_small_encoder/t5_encoder.pt \
   --prompt "The UK government has announced a new package of measures aimed at reducing household energy bills. Ministers said the plan would expand subsidies for low-income families and invest in insulation for older homes. Opposition parties welcomed parts of the proposal but said it did not go far enough to address rising costs. Energy companies are expected to meet officials next week to discuss how the scheme will be delivered." \
   --batch-size 1 \
@@ -69,7 +71,12 @@ python scripts/generate.py \
   --steps 64 \
   --cfg 1 \
   --self-cond-cfg 1
+
+# sampling: {'method': 'ode', 'steps': [64], 'cfgs': [1.0], 'self_cond_cfg_scales': [1.0], 'time_schedule': 'logit_normal', 'sde_gamma': 0.0}
+# {"id": 0, "generated": "Plans to build a range of energy insulation for families and families have been proposed to the UK government."}
+
 ```
+
 
 <table><tbody>
 <td valign="bottom">OpenWebText (unconditional)</td>
