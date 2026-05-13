@@ -64,7 +64,7 @@ python scripts/generate.py \
 python scripts/generate.py \
   --config <PATH>/ELF-B-xsum/ELF-B-xsum.yml \
   --elf-checkpoint <PATH>/ELF-B-xsum/elf_model.pt \
-  --encoder-checkpoint t5_small_encoder/t5_encoder.pt \
+  --encoder-checkpoint <PATH>/t5_small_encoder/t5_encoder.pt \
   --prompt "The UK government has announced a new package of measures aimed at reducing household energy bills. Ministers said the plan would expand subsidies for low-income families and invest in insulation for older homes. Opposition parties welcomed parts of the proposal but said it did not go far enough to address rising costs. Energy companies are expected to meet officials next week to discuss how the scheme will be delivered." \
   --batch-size 1 \
   --method ode \
@@ -74,6 +74,23 @@ python scripts/generate.py \
 
 # sampling: {'method': 'ode', 'steps': [64], 'cfgs': [1.0], 'self_cond_cfg_scales': [1.0], 'time_schedule': 'logit_normal', 'sde_gamma': 0.0}
 # {"id": 0, "generated": "Plans to build a range of energy insulation for families and families have been proposed to the UK government."}
+
+python pytorch_port/scripts/generate.py \
+  --config <PATH>/ELF-B-de-en/ELF-B-de-en.yml \
+  --elf-checkpoint <PATH>/ELF-B-de-en/elf_model.pt \
+  --encoder-checkpoint <PATH>/t5_small_encoder/t5_encoder.pt \
+  --prompt "Eine republikanische Strategie, um der Wiederwahl von Obama entgegenzutreten" \
+  --batch-size 1 \
+  --method ode \
+  --steps 128 \
+  --cfg 1 \
+  --self-cond-cfg 1 \
+  --seed 4
+
+# not sure what is the issue with de-en model, 
+# but single-sample quality is noisy
+# sampling: {'method': 'ode', 'steps': [64], 'cfgs': [2.0], 'self_cond_cfg_scales': [1.0], 'time_schedule': 'logit_normal', 'sde_gamma': 0.0}
+# {"id": 0, "generated": "WarningIRE look policy engaging for Obama’s re-e election:  A Republican strategy to counter Obama’s diction FOR sermon lookingcommitting"}
 
 ```
 
@@ -85,8 +102,8 @@ python scripts/generate.py \
 <td valign="bottom" align="center">ELF-L (652M)</td>
 <tr><td align="left">pre-trained checkpoint</td>
 <td align="center"><a href="https://huggingface.co/Xrenya/ELF-B-owt">ELF-B-owt</a></td>
-<td align="center"><a href="https://huggingface.co/embedded-language-flows/ELF-M-owt">ELF-M-owt</a></td>
-<td align="center"><a href="https://huggingface.co/embedded-language-flows/ELF-L-owt">ELF-L-owt</a></td>
+<td align="center"><a href="https://huggingface.co/Xrenya/ELF-M-owt">ELF-M-owt</a></td>
+<td align="center"><a href="https://huggingface.co/Xrenya/ELF-L-owt">ELF-L-owt</a></td>
 </tr>
 <tr><td align="left">Sampling steps (SDE)</td>
 <td align="center">32</td>
