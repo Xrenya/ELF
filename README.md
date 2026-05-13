@@ -3,7 +3,7 @@
 [![arXiv](https://img.shields.io/badge/arXiv-2605.10938-b31b1b.svg)](https://arxiv.org/abs/2605.10938)&nbsp;
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)&nbsp;
 [![Hugging Face](https://img.shields.io/badge/Hugging%20Face-ELF-blue.svg)](https://huggingface.co/embedded-language-flows)&nbsp;
-[![Github](https://img.shields.io/badge/github-jax.svg)](https://github.com/lillian039/ELF)&nbsp;
+[![Github Official](https://img.shields.io/badge/github-JAX-official.svg)](https://github.com/lillian039/ELF)&nbsp;
 
 This is the **Unofficial PyTorch port** for the paper *ELF: Embedded Language Flows*. This code runs on GPU.
 
