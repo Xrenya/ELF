@@ -53,9 +53,10 @@ python scripts/generate.py \
   --elf-checkpoint ELF-B-owt/elf_model.pt \
   --batch-size 1 \
   --method ode \
-  --steps 64 \
+  --steps 32 \
   --cfg 1 \
-  --self-cond-cfg 1
+  --self-cond-cfg 3 \
+  --sde-gamma 1.5
 
 
 python scripts/generate.py \
