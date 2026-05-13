@@ -1,0 +1,12 @@
+torch>=2.3.0
+transformers>=4.41.2,<4.45.0
+PyYAML>=6.0.1
+numpy>=1.26.4,<2.0.0
+tqdm>=4.66.0
+
+# Conversion only. Runtime generation from converted .pt files does not need JAX.
+jax==0.4.38
+jaxlib==0.4.38
+flax==0.10.2
+orbax-checkpoint==0.5.23
+optax>=0.2.5
