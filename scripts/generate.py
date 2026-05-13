@@ -18,7 +18,9 @@ def find_repo_root(start: Path) -> Path:
     for candidate in [start, *start.parents]:
         if (candidate / "pytorch_port").is_dir():
             return candidate
-    return THIS_FILE.parents[2]
+        if (candidate / "elf_torch").is_dir() and (candidate / "scripts").is_dir():
+            return candidate
+    return PORT_ROOT
 
 
 REPO_ROOT_DEFAULT = find_repo_root(THIS_FILE)
