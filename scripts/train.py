@@ -260,7 +260,7 @@ def main():
     optimizer.zero_grad(set_to_none=True)
 
     autocast_enabled = device.type == "cuda" and dtype in (torch.float16, torch.bfloat16)
-    scaler = torch.cuda.amp.GradScaler(enabled=device.type == "cuda" and dtype == torch.float16)
+    scaler = torch.amp.GradScaler("cuda", enabled=device.type == "cuda" and dtype == torch.float16)
     for epoch in range(start_epoch, config.epochs):
         progress = tqdm(
             train_loader,
