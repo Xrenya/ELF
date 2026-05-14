@@ -37,6 +37,7 @@ class T5RelativePositionBias(nn.Module):
         self.max_distance = max_distance
         self.bidirectional = bidirectional
         self.weight = nn.Parameter(torch.empty(num_buckets, num_heads))
+        nn.init.normal_(self.weight, mean=0.0, std=0.02)
 
     @staticmethod
     def _compute_relative_position(query_length: int, key_length: int, device) -> torch.Tensor:
