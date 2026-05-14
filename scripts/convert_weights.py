@@ -49,7 +49,7 @@ def parse_args():
     )
     parser.add_argument(
         "--output-dir",
-        default="pytorch_port/checkpoints/ELF-B-xsum",
+        default="checkpoints/ELF-B-xsum",
         help="Where to write elf_model.pt, t5_encoder.pt, and metadata.json.",
     )
     parser.add_argument(

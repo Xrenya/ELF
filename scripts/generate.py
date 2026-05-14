@@ -25,12 +25,12 @@ def parse_args():
     parser.add_argument("--config", default="ELF-B-xsum/ELF-B-xsum.yml")
     parser.add_argument(
         "--elf-checkpoint",
-        default="pytorch_port/checkpoints/ELF-B-xsum/elf_model.pt",
+        default="ELF-B-xsum/elf_model.pt",
         help="Converted PyTorch ELF checkpoint.",
     )
     parser.add_argument(
         "--encoder-checkpoint",
-        default="pytorch_port/checkpoints/ELF-B-xsum/t5_encoder.pt",
+        default="t5_small_encoder/t5_encoder.pt",
         help="Converted PyTorch T5 encoder checkpoint. Required for conditional prompts.",
     )
     parser.add_argument("--prompt", action="append", default=[], help="Conditional prompt. Repeat for a batch.")
@@ -85,6 +85,26 @@ def load_state(path: Path):
     return payload, {}
 
 
+def validate_checkpoint_config(config, checkpoint_payload: dict) -> None:
+    checkpoint_config = checkpoint_payload.get("config", {}) if isinstance(checkpoint_payload, dict) else {}
+    checkpoint_model = checkpoint_config.get("model")
+    if checkpoint_model and checkpoint_model != config.model:
+        raise RuntimeError(
+            f"Config/checkpoint mismatch: --config builds {config.model}, "
+            f"but --elf-checkpoint was saved from {checkpoint_model}. "
+            "Use the YAML that belongs to this checkpoint."
+        )
+    for field in ("data_path", "eval_data_path", "max_length", "max_input_length", "latent_std"):
+        checkpoint_value = checkpoint_config.get(field)
+        current_value = getattr(config, field, None)
+        if checkpoint_value is not None and checkpoint_value != current_value:
+            raise RuntimeError(
+                f"Config/checkpoint mismatch for {field}: --config has {current_value!r}, "
+                f"but --elf-checkpoint was saved with {checkpoint_value!r}. "
+                "Use the YAML that belongs to this checkpoint."
+            )
+
+
 def selected_sampling_config(config, args) -> SamplingConfig:
     if not config.sampling_configs:
         sc = SamplingConfig()
@@ -132,6 +152,7 @@ def main():
 
     tokenizer = AutoTokenizer.from_pretrained(config.tokenizer_name or config.encoder_model_name)
     elf_state, elf_payload = load_state(resolve_path(args.elf_checkpoint))
+    validate_checkpoint_config(config, elf_payload)
     vocab_size = int(elf_payload.get("metadata", {}).get("vocab_size", elf_state["unembed_bias"].shape[0]))
     final_norm = float(elf_state["final_layer.linear.weight"].float().norm())
     if final_norm < 1e-8:
