@@ -303,6 +303,18 @@ class ELF(nn.Module):
         self.unembed_kernel = nn.Parameter(torch.empty(text_encoder_dim, vocab_size))
         self.unembed_bias = nn.Parameter(torch.empty(vocab_size))
         self.final_layer = FinalLayer(hidden_size, 1, text_encoder_dim)
+        self.reset_parameters()
+
+    def reset_parameters(self) -> None:
+        nn.init.normal_(self.t_emb_tokens, mean=0.0, std=0.02)
+        if self.self_cond_cfg_tokens is not None:
+            nn.init.normal_(self.self_cond_cfg_tokens, mean=0.0, std=0.02)
+        if self.mode_tokens is not None:
+            nn.init.normal_(self.mode_tokens, mean=0.0, std=0.02)
+        nn.init.xavier_uniform_(self.proj_kernel)
+        nn.init.zeros_(self.proj_bias)
+        nn.init.xavier_uniform_(self.unembed_kernel)
+        nn.init.zeros_(self.unembed_bias)
 
     def _make_prefix(self, emb: torch.Tensor, tokens: torch.Tensor) -> torch.Tensor:
         return tokens.expand(emb.shape[0], -1, -1) + emb[:, None, :]
