@@ -225,6 +225,7 @@ def main():
     args = parse_args()
     device = torch.device(args.device)
     run_branch(decoder_prob=0.0, device=device)
+    run_branch(decoder_prob=0.5, device=device)
     run_branch(decoder_prob=1.0, device=device)
     run_checkpoint_roundtrip(device=device)
     print("smoke_train: ok")

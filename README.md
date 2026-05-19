@@ -75,7 +75,7 @@ python scripts/generate.py \
 # sampling: {'method': 'ode', 'steps': [64], 'cfgs': [1.0], 'self_cond_cfg_scales': [1.0], 'time_schedule': 'logit_normal', 'sde_gamma': 0.0}
 # {"id": 0, "generated": "Plans to build a range of energy insulation for families and families have been proposed to the UK government."}
 
-python scripts/generate.py \
+python pytorch_port/scripts/generate.py \
   --config <PATH>/ELF-B-de-en/ELF-B-de-en.yml \
   --elf-checkpoint <PATH>/ELF-B-de-en/elf_model.pt \
   --encoder-checkpoint <PATH>/t5_small_encoder/t5_encoder.pt \

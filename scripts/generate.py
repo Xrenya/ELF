@@ -15,6 +15,7 @@ if str(REPO_ROOT_DEFAULT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT_DEFAULT))
 
 from elf_torch.config import SamplingConfig, apply_config_overrides, load_config_from_yaml
+from elf_torch.checkpoint import load_model_state
 from elf_torch.model import build_elf_from_config
 from elf_torch.sampling import generate_conditional, generate_unconditional
 from elf_torch.t5_encoder import T5Encoder, T5EncoderConfig
@@ -26,7 +27,7 @@ def parse_args():
     parser.add_argument(
         "--elf-checkpoint",
         default="ELF-B-xsum/elf_model.pt",
-        help="Converted PyTorch ELF checkpoint.",
+        help="Converted PyTorch ELF checkpoint path or HF repo id.",
     )
     parser.add_argument(
         "--encoder-checkpoint",
@@ -49,6 +50,12 @@ def parse_args():
     parser.add_argument("--sde-gamma", type=float, default=None)
     parser.add_argument("--time-schedule", choices=("uniform", "logit_normal"), default=None)
     parser.add_argument("--no-progress", action="store_true")
+    parser.add_argument(
+        "--model-key",
+        choices=("ema_params1", "params", "state_dict", "raw_state_dict"),
+        default="ema_params1",
+        help="Checkpoint tensor tree to load when the file contains training-state keys.",
+    )
     return parser.parse_args()
 
 
@@ -57,6 +64,16 @@ def resolve_path(value: str) -> Path:
     if path.is_absolute():
         return path
     return (REPO_ROOT_DEFAULT / path).resolve()
+
+
+def resolve_checkpoint_value(value: str) -> str | Path:
+    path = Path(value)
+    if path.is_absolute() or path.exists():
+        return path
+    repo_path = REPO_ROOT_DEFAULT / path
+    if repo_path.exists():
+        return repo_path.resolve()
+    return value
 
 
 def load_prompts(args) -> list[str]:
@@ -76,13 +93,6 @@ def load_prompts(args) -> list[str]:
     if prompts and len(prompts) == 1 and args.num_samples > 1:
         prompts = prompts * args.num_samples
     return prompts
-
-
-def load_state(path: Path):
-    payload = torch.load(path, map_location="cpu")
-    if isinstance(payload, dict) and "state_dict" in payload:
-        return payload["state_dict"], payload
-    return payload, {}
 
 
 def validate_checkpoint_config(config, checkpoint_payload: dict) -> None:
@@ -126,9 +136,95 @@ def selected_sampling_config(config, args) -> SamplingConfig:
     return sc
 
 
+def apply_official_checkpoint_defaults(config, checkpoint: str) -> None:
+    checkpoint = checkpoint.lower()
+    common = {
+        "encoder_model_name": "t5-small",
+        "latent_mean": 0.0,
+        "latent_std": 0.2,
+        "bottleneck_dim": 128,
+        "num_time_tokens": 4,
+        "num_self_cond_cfg_tokens": 4,
+        "num_model_mode_tokens": 4,
+        "denoiser_p_mean": -1.5,
+        "denoiser_p_std": 0.8,
+        "denoiser_noise_scale": 2.0,
+        "t_eps": 0.05,
+        "time_schedule": "logit_normal",
+        "decoder_prob": 0.2,
+        "decoder_p_mean": 0.8,
+        "decoder_p_std": 0.8,
+        "self_cond_prob": 0.5,
+    }
+    for key, value in common.items():
+        setattr(config, key, value)
+
+    if "elf-m-owt-torch" in checkpoint:
+        config.model = "ELF-M"
+    elif "elf-l-owt-torch" in checkpoint:
+        config.model = "ELF-L"
+    else:
+        config.model = "ELF-B"
+
+    if "owt-torch" in checkpoint:
+        config.data_path = "embedded-language-flows/openwebtext-t5"
+        config.eval_data_path = None
+        config.max_length = 1024
+        config.max_input_length = None
+        config.pad_token = "pad"
+        config.decoder_noise_scale = 5.0
+        config.sampling_configs = [
+            SamplingConfig(
+                sampling_method="sde",
+                num_sampling_steps=[32],
+                cfgs=[1],
+                self_cond_cfg_scales=[3],
+                time_schedule="logit_normal",
+                sde_gamma=1.5,
+            )
+        ]
+    elif "xsum-torch" in checkpoint:
+        config.data_path = "embedded-language-flows/xsum_train_t5"
+        config.eval_data_path = "embedded-language-flows/xsum_validation_t5"
+        config.max_length = 1088
+        config.max_input_length = 1024
+        config.pad_token = "eos"
+        config.decoder_noise_scale = 1.0
+        config.label_drop_prob = 0.1
+        config.sampling_configs = [
+            SamplingConfig(
+                sampling_method="ode",
+                num_sampling_steps=[64],
+                cfgs=[2],
+                self_cond_cfg_scales=[1],
+                time_schedule="logit_normal",
+            )
+        ]
+    elif "de-en-torch" in checkpoint:
+        config.data_path = "embedded-language-flows/wmt14_de-en_train_t5"
+        config.eval_data_path = "embedded-language-flows/wmt14_de-en_validation_t5"
+        config.max_length = 128
+        config.max_input_length = 64
+        config.pad_token = "eos"
+        config.decoder_noise_scale = 1.0
+        config.label_drop_prob = 0.1
+        config.sampling_configs = [
+            SamplingConfig(
+                sampling_method="ode",
+                num_sampling_steps=[64],
+                cfgs=[2],
+                self_cond_cfg_scales=[1],
+                time_schedule="logit_normal",
+            )
+        ]
+
+
 def main():
     args = parse_args()
-    config = load_config_from_yaml(resolve_path(args.config))
+    config_path = resolve_path(args.config)
+    config = load_config_from_yaml(config_path)
+    if not config_path.is_file():
+        apply_official_checkpoint_defaults(config, args.elf_checkpoint)
     if args.config_override:
         config = apply_config_overrides(config, args.config_override)
     sampling_config = selected_sampling_config(config, args)
@@ -151,20 +247,27 @@ def main():
     device = torch.device(device)
 
     tokenizer = AutoTokenizer.from_pretrained(config.tokenizer_name or config.encoder_model_name)
-    elf_state, elf_payload = load_state(resolve_path(args.elf_checkpoint))
-    validate_checkpoint_config(config, elf_payload)
-    vocab_size = int(elf_payload.get("metadata", {}).get("vocab_size", elf_state["unembed_bias"].shape[0]))
+    elf_state, elf_metadata, elf_path = load_model_state(
+        resolve_checkpoint_value(args.elf_checkpoint),
+        model_key=args.model_key,
+    )
+    validate_checkpoint_config(config, {"config": elf_metadata.get("config", {}), "metadata": elf_metadata})
+    vocab_size = int(elf_metadata.get("vocab_size", elf_state["unembed_bias"].shape[0]))
     final_norm = float(elf_state["final_layer.linear.weight"].float().norm())
     if final_norm < 1e-8:
         raise RuntimeError(
             "The converted ELF checkpoint looks untrained: final_layer.linear.weight has near-zero norm. "
             "Reconvert from a complete ELF checkpoint, preferably `--checkpoint embedded-language-flows/ELF-B-xsum`."
         )
+    print(f"loaded ELF checkpoint: {elf_path}", file=sys.stderr)
 
     encoder_state = None
     encoder_payload = {}
     if args.prompt or args.prompts_file:
-        encoder_state, encoder_payload = load_state(resolve_path(args.encoder_checkpoint))
+        encoder_state, encoder_payload, encoder_path = load_model_state(
+            resolve_checkpoint_value(args.encoder_checkpoint)
+        )
+        print(f"loaded encoder checkpoint: {encoder_path}", file=sys.stderr)
         t5_config = T5EncoderConfig(**encoder_payload.get("config", {}))
     else:
         t5_config = T5EncoderConfig.from_pretrained(config.encoder_model_name)

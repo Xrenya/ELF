@@ -10,6 +10,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from .checkpoint import normalize_elf_state_dict, resolve_checkpoint_path
 from .sampling import encode_text, net_out_to_v_x, restore_cond
 
 
@@ -177,12 +178,17 @@ def compute_train_loss(
     device = input_ids.device
     model_dtype = next(model.parameters()).dtype
 
-    encoder_attention_mask = batch["encoder_attention_mask"]
-    cond_seq_mask_2d = batch["cond_seq_mask"]
+    encoder_attention_mask = batch["encoder_attention_mask"].to(device=device, dtype=torch.float32)
+    cond_seq_mask_2d = batch["cond_seq_mask"].to(device=device, dtype=model_dtype)
     cond_seq_mask = cond_seq_mask_2d[:, :, None]
+    attention_mask = batch["attention_mask"].to(device=device, dtype=model_dtype)
+    label_drop_mask = batch.get(
+        "label_drop_mask",
+        torch.zeros(batch_size, device=device, dtype=torch.bool),
+    ).to(device=device, dtype=torch.bool)
 
     if config.label_drop_prob > 0:
-        drop = batch["label_drop_mask"][:, None, None]
+        drop = label_drop_mask[:, None, None]
         block_mask = (1.0 - cond_seq_mask_2d)[:, :, None] * cond_seq_mask_2d[:, None, :]
         encoder_attention_mask = encoder_attention_mask * (1.0 - drop.to(block_mask.dtype) * block_mask)
 
@@ -208,23 +214,32 @@ def compute_train_loss(
     denoiser_z = add_noise(x0, noise, t, config, cond_seq_mask=cond_seq_mask)
 
     if config.label_drop_prob > 0:
-        drop_tokens = batch["label_drop_mask"][:, None, None] & (cond_seq_mask > 0)
+        drop_tokens = label_drop_mask[:, None, None] & (cond_seq_mask > 0)
         denoiser_z = torch.where(drop_tokens, torch.zeros_like(denoiser_z), denoiser_z)
         x0 = torch.where(drop_tokens, torch.zeros_like(x0), x0)
 
     if config.pad_token == "pad":
-        loss_mask = batch["attention_mask"]
+        loss_mask = attention_mask
     else:
-        loss_mask = torch.ones_like(batch["attention_mask"])
+        loss_mask = torch.ones_like(attention_mask)
     loss_mask = loss_mask * (1.0 - cond_seq_mask_2d)
 
     decoder_targets = input_ids
-    decoder_step_active = torch.rand((), device=device) < config.decoder_prob
+    decoder_step_active = torch.bernoulli(
+        torch.full(
+            (batch_size,),
+            float(config.decoder_prob),
+            device=device,
+            dtype=torch.float32,
+        )
+    ).to(dtype=model_dtype)
+    decoder_mask_b11 = decoder_step_active.reshape(-1, 1, 1)
+    decoder_mask_b1 = decoder_step_active.reshape(-1, 1)
 
     if config.self_cond_prob > 0:
         use_self_cond_mask = (
             torch.rand(batch_size, device=device) < config.self_cond_prob
-        ).reshape(-1, 1, 1)
+        ).reshape(-1, 1, 1).to(dtype=model_dtype)
     else:
         use_self_cond_mask = None
 
@@ -239,83 +254,112 @@ def compute_train_loss(
     else:
         self_cond_cfg_scale = None
 
-    if bool(decoder_step_active.item()):
-        lambda_t = torch.sigmoid(
-            torch.randn(batch_size * seq_length, device=device, dtype=model_dtype)
-            * config.decoder_p_std
-            + config.decoder_p_mean
-        ).reshape(batch_size, seq_length, 1)
-        decoder_noise = torch.randn_like(x0) * config.decoder_noise_scale
-        decoder_z = lambda_t * x0 + (1.0 - lambda_t) * decoder_noise
-        decoder_input = (
-            torch.cat([decoder_z, torch.zeros_like(decoder_z)], dim=-1)
-            if config.self_cond_prob > 0
-            else decoder_z
-        )
-        decoder_t = torch.ones(batch_size, device=device, dtype=model_dtype)
-        _, decoder_logits = model(
-            decoder_input,
-            decoder_t,
-            self_cond_cfg_scale=self_cond_cfg_scale,
-            decoder_step_active=True,
-        )
-        ce = F.cross_entropy(
-            decoder_logits.float().reshape(-1, decoder_logits.shape[-1]),
-            decoder_targets.reshape(-1),
-            reduction="none",
-        ).reshape(batch_size, seq_length)
-        ce_loss = reduce_token_loss(ce, loss_mask)
-        l2_loss = torch.zeros((), device=device, dtype=ce_loss.dtype)
-        loss = ce_loss
-    else:
-        denoiser_input = _self_conditioned_input(
-            model,
-            denoiser_z,
-            t,
-            x0,
-            cond_seq_mask,
-            self_cond_cfg_scale,
-            use_self_cond_mask,
-            config,
-        )
-        net_out, _ = model(
-            denoiser_input,
-            t,
-            self_cond_cfg_scale=self_cond_cfg_scale,
-        )
-        v_pred, _ = net_out_to_v_x(net_out, denoiser_z, t, config.t_eps)
-        t_reshaped = t.reshape(-1, 1, 1)
-        v_target = (x0 - denoiser_z) / torch.maximum(
-            1.0 - t_reshaped,
-            torch.full_like(t_reshaped, config.t_eps),
-        )
-        v_target = _self_condition_guidance(
-            model,
-            denoiser_z,
-            t,
-            x0,
-            cond_seq_mask,
-            self_cond_cfg_scale,
-            use_self_cond_mask,
-            v_target,
-            config,
-        )
-        l2 = (v_pred - v_target).pow(2).mean(dim=-1)
-        l2_loss = reduce_token_loss(l2, loss_mask)
-        ce_loss = torch.zeros((), device=device, dtype=l2_loss.dtype)
-        loss = l2_loss
+    decoder_lambda = torch.sigmoid(
+        torch.randn(batch_size * seq_length, device=device, dtype=model_dtype)
+        * config.decoder_p_std
+        + config.decoder_p_mean
+    ).reshape(batch_size, seq_length, 1)
+    decoder_noise = torch.randn_like(x0) * config.decoder_noise_scale
+    decoder_z = decoder_lambda * x0 + (1.0 - decoder_lambda) * decoder_noise
 
-    denoiser_prob = max(1.0 - float(config.decoder_prob), 1e-8)
-    decoder_prob = max(float(config.decoder_prob), 1e-8)
+    denoiser_t = t
+    decoder_t = torch.ones_like(t)
+    t_mixed = decoder_step_active * decoder_t + (1.0 - decoder_step_active) * denoiser_t
+    z_mixed = decoder_mask_b11 * decoder_z + (1.0 - decoder_mask_b11) * denoiser_z
+
+    t_reshaped = t.reshape(-1, 1, 1)
+    v_target = (x0 - denoiser_z) / torch.maximum(
+        1.0 - t_reshaped,
+        torch.full_like(t_reshaped, config.t_eps),
+    )
+
+    shared_net_out_uncond = None
+    if config.self_cond_prob > 0 or config.num_self_cond_cfg_tokens > 0:
+        z_uncond = restore_cond(torch.zeros_like(denoiser_z), x0, cond_seq_mask)
+        z_input_uncond = torch.cat([denoiser_z, z_uncond], dim=-1)
+        shared_net_out_uncond = _deterministic_forward(
+            model,
+            z_input_uncond,
+            denoiser_t,
+            self_cond_cfg_scale=self_cond_cfg_scale,
+            deterministic=True,
+        )
+
+    if config.self_cond_prob > 0:
+        _, x_pred_init = net_out_to_v_x(
+            shared_net_out_uncond,
+            denoiser_z,
+            denoiser_t,
+            config.t_eps,
+        )
+        x_pred_init = restore_cond(x_pred_init, x0, cond_seq_mask)
+        x_pred_cond = x_pred_init * use_self_cond_mask
+        x_pred_cond = restore_cond(x_pred_cond, x0, cond_seq_mask)
+        self_cond_half = x_pred_cond * (1.0 - decoder_mask_b11)
+        model_input = torch.cat([z_mixed, self_cond_half], dim=-1)
+    else:
+        model_input = z_mixed
+
+    net_out, decoder_logits = model(
+        model_input,
+        t_mixed,
+        self_cond_cfg_scale=self_cond_cfg_scale,
+        decoder_step_active=decoder_step_active,
+        deterministic=False,
+    )
+    if decoder_logits is None:
+        raise RuntimeError("Decoder logits were not produced for mixed decoder/denoiser training.")
+
+    ce = F.cross_entropy(
+        decoder_logits.float().reshape(-1, decoder_logits.shape[-1]),
+        decoder_targets.reshape(-1),
+        reduction="none",
+    ).reshape(batch_size, seq_length)
+
+    v_pred, _ = net_out_to_v_x(net_out, denoiser_z, denoiser_t, config.t_eps)
+
+    if config.num_self_cond_cfg_tokens > 0 and config.self_cond_prob > 0:
+        if shared_net_out_uncond is None or self_cond_cfg_scale is None:
+            raise RuntimeError("Self-conditioning CFG guidance expected a shared unconditional forward.")
+        v_uncond, x_uncond = net_out_to_v_x(
+            shared_net_out_uncond,
+            denoiser_z,
+            denoiser_t,
+            config.t_eps,
+        )
+        x_uncond = restore_cond(x_uncond, x0, cond_seq_mask)
+        z_input_cond = torch.cat([denoiser_z, x_uncond], dim=-1)
+        net_out_cond = _deterministic_forward(
+            model,
+            z_input_cond,
+            denoiser_t,
+            self_cond_cfg_scale=self_cond_cfg_scale,
+            deterministic=True,
+        )
+        v_cond, _ = net_out_to_v_x(net_out_cond, denoiser_z, denoiser_t, config.t_eps)
+        sc_w = self_cond_cfg_scale.reshape(-1, 1, 1).clamp_min(1e-6)
+        sc_guidance = (1.0 - 1.0 / sc_w) * (v_cond - v_uncond)
+        sc_guidance = torch.where(
+            use_self_cond_mask.bool(),
+            sc_guidance,
+            torch.zeros_like(sc_guidance),
+        )
+        v_target = (v_target + sc_guidance).detach()
+
+    l2 = (v_pred - v_target).pow(2).mean(dim=-1)
+
+    loss_mask_f = loss_mask.to(dtype=ce.dtype)
+    ce_mask = loss_mask_f * decoder_mask_b1.to(dtype=loss_mask_f.dtype)
+    l2_mask = loss_mask_f * (1.0 - decoder_mask_b1.to(dtype=loss_mask_f.dtype))
+    loss = ((ce * ce_mask).sum() + (l2 * l2_mask).sum()) / loss_mask_f.sum().clamp_min(1.0)
+    ce_loss = (ce * ce_mask).sum() / ce_mask.sum().clamp_min(1.0)
+    l2_loss = (l2 * l2_mask).sum() / l2_mask.sum().clamp_min(1.0)
+
     metrics = {
         "loss": float(loss.detach().cpu()),
-        "l2_loss": float((l2_loss.detach() / denoiser_prob).cpu())
-        if not bool(decoder_step_active.item())
-        else 0.0,
-        "ce_loss": float((ce_loss.detach() / decoder_prob).cpu())
-        if bool(decoder_step_active.item())
-        else 0.0,
-        "branch": 1.0 if bool(decoder_step_active.item()) else 0.0,
+        "l2_loss": float(l2_loss.detach().cpu()),
+        "ce_loss": float(ce_loss.detach().cpu()),
+        "branch": float(decoder_step_active.detach().float().mean().cpu()),
     }
     return loss, metrics
 
@@ -444,17 +488,32 @@ def load_training_checkpoint(
     scheduler=None,
     map_location="cpu",
 ) -> tuple[int, float]:
-    ckpt_path = resolve_resume_checkpoint(path)
+    ckpt_path = resolve_checkpoint_path(path, prefer_training=True)
     payload = torch.load(ckpt_path, map_location=map_location)
     if not isinstance(payload, dict) or "state_dict" not in payload:
-        payload = {"state_dict": payload}
-    raw_state = payload.get("raw_state_dict") or payload["state_dict"]
-    ema_state = payload.get("state_dict") or raw_state
-    model.load_state_dict(raw_state)
-    ema_model.load_state_dict(ema_state)
+        if isinstance(payload, dict) and ("params" in payload or "ema_params1" in payload):
+            pass
+        else:
+            payload = {"state_dict": payload}
+    raw_state = payload.get("raw_state_dict") or payload.get("params") or payload["state_dict"]
+    ema_state = payload.get("state_dict") or payload.get("ema_params1") or raw_state
+    model.load_state_dict(normalize_elf_state_dict(raw_state))
+    ema_model.load_state_dict(normalize_elf_state_dict(ema_state))
     if optimizer is not None and payload.get("optimizer") is not None:
         optimizer.load_state_dict(payload["optimizer"])
+    elif optimizer is not None and payload.get("opt_state") is not None:
+        try:
+            optimizer.load_state_dict(payload["opt_state"])
+        except ValueError:
+            pass
     if scheduler is not None and payload.get("scheduler") is not None:
         scheduler.load_state_dict(payload["scheduler"])
+    elif scheduler is not None and payload.get("lr_scheduler") is not None:
+        try:
+            scheduler.load_state_dict(payload["lr_scheduler"])
+        except ValueError:
+            pass
     metadata = payload.get("metadata", {})
-    return int(metadata.get("step", 0)), float(metadata.get("epoch", 0.0))
+    step = payload.get("step", metadata.get("step", 0))
+    epoch = payload.get("epoch", metadata.get("epoch", 0.0))
+    return int(step), float(epoch)

@@ -6,6 +6,25 @@ from typing import Callable
 import torch
 from torch import nn
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
+
+
+def _init_linear_xavier(module: nn.Linear) -> None:
+    nn.init.xavier_uniform_(module.weight)
+    if module.bias is not None:
+        nn.init.zeros_(module.bias)
+
+
+def _init_linear_normal_002(module: nn.Linear) -> None:
+    nn.init.normal_(module.weight, mean=0.0, std=0.02)
+    if module.bias is not None:
+        nn.init.zeros_(module.bias)
+
+
+def _init_linear_zero(module: nn.Linear) -> None:
+    nn.init.zeros_(module.weight)
+    if module.bias is not None:
+        nn.init.zeros_(module.bias)
 
 
 def rotate_half(x: torch.Tensor) -> torch.Tensor:
@@ -69,10 +88,9 @@ class RMSNorm(nn.Module):
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         input_dtype = hidden_states.dtype
-        hidden_states = hidden_states.float()
-        variance = hidden_states.pow(2).mean(dim=-1, keepdim=True)
-        hidden_states = hidden_states * torch.rsqrt(variance + self.eps)
-        return (self.weight * hidden_states).to(dtype=input_dtype)
+        variance = hidden_states.float().pow(2).mean(dim=-1, keepdim=True)
+        inv_std = torch.rsqrt(variance + self.eps).to(dtype=input_dtype)
+        return self.weight.to(dtype=input_dtype) * (hidden_states * inv_std)
 
 
 class BottleneckTextProj(nn.Module):
@@ -80,6 +98,8 @@ class BottleneckTextProj(nn.Module):
         super().__init__()
         self.proj1 = nn.Linear(text_encoder_dim, bottleneck_dim, bias=False)
         self.proj2 = nn.Linear(bottleneck_dim, hidden_size, bias=True)
+        _init_linear_xavier(self.proj1)
+        _init_linear_xavier(self.proj2)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.proj2(self.proj1(x))
@@ -95,6 +115,8 @@ class TimestepEmbedder(nn.Module):
             nn.SiLU(),
             nn.Linear(hidden_size, hidden_size),
         )
+        _init_linear_normal_002(self.mlp[0])
+        _init_linear_normal_002(self.mlp[2])
 
     @staticmethod
     def timestep_embedding(t: torch.Tensor, dim: int, max_period: int = 10000) -> torch.Tensor:
@@ -120,18 +142,16 @@ def scaled_dot_product_attention(
     value: torch.Tensor,
     attn_mask: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    scale = 1.0 / math.sqrt(query.shape[-1])
-    attn_weight = torch.matmul(query.float(), key.float().transpose(-2, -1)) * scale
+    bool_mask: torch.Tensor | None = None
     if attn_mask is not None:
         if attn_mask.ndim == 2:
-            mask = attn_mask[:, None, None, :]
+            bool_mask = attn_mask[:, None, None, :]
         elif attn_mask.ndim == 3:
-            mask = attn_mask[:, None, :, :]
+            bool_mask = attn_mask[:, None, :, :]
         else:
-            mask = attn_mask
-        attn_weight = attn_weight.masked_fill(mask == 0, -1e9)
-    attn_weight = torch.softmax(attn_weight, dim=-1).to(dtype=value.dtype)
-    return torch.matmul(attn_weight, value)
+            bool_mask = attn_mask
+        bool_mask = bool_mask.bool()
+    return F.scaled_dot_product_attention(query, key, value, attn_mask=bool_mask)
 
 
 class Attention(nn.Module):
@@ -148,18 +168,22 @@ class Attention(nn.Module):
         self.dim = dim
         self.num_heads = num_heads
         self.qk_norm = qk_norm
+        self.attn_drop = attn_drop
+        self.proj_drop = proj_drop
         self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
         head_dim = dim // num_heads
         self.q_norm = RMSNorm(head_dim) if qk_norm else nn.Identity()
         self.k_norm = RMSNorm(head_dim) if qk_norm else nn.Identity()
         self.proj = nn.Linear(dim, dim)
-        self.proj_drop = nn.Dropout(proj_drop)
+        _init_linear_xavier(self.qkv)
+        _init_linear_xavier(self.proj)
 
     def forward(
         self,
         x: torch.Tensor,
         rope_fn: Callable[[torch.Tensor], torch.Tensor] | None,
         attention_mask: torch.Tensor | None = None,
+        deterministic: bool = True,
     ) -> torch.Tensor:
         bsz, seq_len, channels = x.shape
         head_dim = self.dim // self.num_heads
@@ -175,7 +199,10 @@ class Attention(nn.Module):
             k = rope_fn(k)
         x = scaled_dot_product_attention(q, k, v, attn_mask=attention_mask)
         x = x.transpose(1, 2).reshape(bsz, seq_len, channels)
-        return self.proj_drop(self.proj(x))
+        x = self.proj(x)
+        if self.proj_drop > 0.0:
+            x = F.dropout(x, p=self.proj_drop, training=not deterministic)
+        return x
 
 
 class SwiGLUFFN(nn.Module):
@@ -183,12 +210,16 @@ class SwiGLUFFN(nn.Module):
         super().__init__()
         inner_dim = int(hidden_dim * 2 / 3)
         self.w12 = nn.Linear(dim, inner_dim * 2, bias=bias)
-        self.drop = nn.Dropout(drop)
+        self.drop = drop
         self.w3 = nn.Linear(inner_dim, dim, bias=bias)
+        _init_linear_xavier(self.w12)
+        _init_linear_xavier(self.w3)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, deterministic: bool = True) -> torch.Tensor:
         x1, x2 = self.w12(x).chunk(2, dim=-1)
-        hidden = self.drop(F.silu(x1) * x2)
+        hidden = F.silu(x1) * x2
+        if self.drop > 0.0:
+            hidden = F.dropout(hidden, p=self.drop, training=not deterministic)
         return self.w3(hidden)
 
 
@@ -197,6 +228,7 @@ class FinalLayer(nn.Module):
         super().__init__()
         self.norm_final = RMSNorm(hidden_size)
         self.linear = nn.Linear(hidden_size, patch_size * patch_size * out_channels)
+        _init_linear_zero(self.linear)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.linear(self.norm_final(x))
@@ -230,9 +262,15 @@ class ELFBlock(nn.Module):
         x: torch.Tensor,
         rope_fn: Callable[[torch.Tensor], torch.Tensor] | None = None,
         attention_mask: torch.Tensor | None = None,
+        deterministic: bool = True,
     ) -> torch.Tensor:
-        x = x + self.attn(self.norm1(x), rope_fn, attention_mask=attention_mask)
-        x = x + self.mlp(self.norm2(x))
+        x = x + self.attn(
+            self.norm1(x),
+            rope_fn,
+            attention_mask=attention_mask,
+            deterministic=deterministic,
+        )
+        x = x + self.mlp(self.norm2(x), deterministic=deterministic)
         return x
 
 
@@ -253,6 +291,7 @@ class ELF(nn.Module):
         num_model_mode_tokens: int = 0,
         vocab_size: int = 0,
         use_self_cond_proj: bool = True,
+        gradient_checkpointing: bool = False,
     ):
         super().__init__()
         self.text_encoder_dim = text_encoder_dim
@@ -265,9 +304,14 @@ class ELF(nn.Module):
         self.num_self_cond_cfg_tokens = num_self_cond_cfg_tokens
         self.num_model_mode_tokens = num_model_mode_tokens
         self.vocab_size = vocab_size
+        self.gradient_checkpointing = gradient_checkpointing
+        if num_time_tokens <= 0:
+            raise ValueError("num_time_tokens must be positive for prefix time conditioning")
         self.self_cond_proj = (
             nn.Linear(text_encoder_dim * 2, text_encoder_dim) if use_self_cond_proj else None
         )
+        if self.self_cond_proj is not None:
+            _init_linear_xavier(self.self_cond_proj)
         self.text_proj = BottleneckTextProj(text_encoder_dim, hidden_size, bottleneck_dim)
         self.t_embedder = TimestepEmbedder(hidden_size)
         self.t_emb_tokens = nn.Parameter(torch.empty(1, num_time_tokens, hidden_size))
@@ -283,6 +327,16 @@ class ELF(nn.Module):
             self.mode_tokens = nn.Parameter(torch.empty(1, num_model_mode_tokens, hidden_size))
         else:
             self.register_parameter("mode_tokens", None)
+
+        head_dim = hidden_size // num_heads
+        prefix_total = num_model_mode_tokens + num_time_tokens
+        if num_self_cond_cfg_tokens > 0:
+            prefix_total += num_self_cond_cfg_tokens
+        self.feat_rope = TextRotaryEmbeddingFast(
+            dim=head_dim,
+            pt_seq_len=max_length,
+            num_empty_token=prefix_total,
+        )
 
         q1, q3 = depth // 4, depth // 4 * 3
         blocks = []
@@ -343,6 +397,7 @@ class ELF(nn.Module):
         attention_mask: torch.Tensor | None = None,
         self_cond_cfg_scale: torch.Tensor | None = None,
         decoder_step_active: bool | torch.Tensor | None = None,
+        deterministic: bool = True,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         if t.ndim == 0:
             t = t.expand(x.shape[0])
@@ -350,19 +405,24 @@ class ELF(nn.Module):
             self_cond_cfg_scale = self_cond_cfg_scale.expand(x.shape[0])
 
         bsz = x.shape[0]
-        if self.self_cond_proj is not None and x.shape[-1] == 2 * self.text_encoder_dim:
-            x = self.self_cond_proj(x)
-
-        x = self.text_proj(x)
+        with torch.amp.autocast("cuda", enabled=False):
+            if self.self_cond_proj is not None and x.shape[-1] == 2 * self.text_encoder_dim:
+                x = self.self_cond_proj(x.float())
+            x = self.text_proj(x.float())
+            context_prefix_tokens = self.build_context(t, self_cond_cfg_scale)
 
         model_mode_offset = 0
         if self.mode_tokens is not None:
             mode_tokens = self.mode_tokens.expand(bsz, -1, -1)
-            active_gate = False if decoder_step_active is None else decoder_step_active
-            if isinstance(active_gate, torch.Tensor):
-                active_gate = bool(active_gate.detach().item())
-            if not active_gate:
-                mode_tokens = torch.zeros_like(mode_tokens)
+            if decoder_step_active is None:
+                active_gate = 0.0
+            elif isinstance(decoder_step_active, torch.Tensor) and decoder_step_active.ndim > 0:
+                active_gate = decoder_step_active.to(mode_tokens.dtype).reshape(-1, 1, 1)
+            elif isinstance(decoder_step_active, torch.Tensor):
+                active_gate = float(decoder_step_active.detach().item())
+            else:
+                active_gate = float(decoder_step_active)
+            mode_tokens = mode_tokens * active_gate
             x = torch.cat([mode_tokens, x], dim=1)
             model_mode_offset = self.num_model_mode_tokens
             if attention_mask is not None:
@@ -371,7 +431,6 @@ class ELF(nn.Module):
                 )
                 attention_mask = torch.cat([mode_mask, attention_mask], dim=1)
 
-        context_prefix_tokens = self.build_context(t, self_cond_cfg_scale)
         prefix_len = 0
         if context_prefix_tokens:
             prefix_tokens = torch.cat(context_prefix_tokens, dim=1)
@@ -383,32 +442,36 @@ class ELF(nn.Module):
                 )
                 attention_mask = torch.cat([prefix_mask, attention_mask], dim=1)
 
-        head_dim = self.hidden_size // self.num_heads
-        rope_fn = TextRotaryEmbeddingFast(
-            dim=head_dim,
-            pt_seq_len=self.max_length,
-            num_empty_token=prefix_len + model_mode_offset,
-        ).to(device=x.device)
-
+        use_checkpoint = self.gradient_checkpointing and self.training and torch.is_grad_enabled()
         for block in self.blocks:
-            x = block(x, rope_fn=rope_fn, attention_mask=attention_mask)
+            if use_checkpoint:
+                def _block_forward(hidden: torch.Tensor, block: ELFBlock = block) -> torch.Tensor:
+                    return block(
+                        hidden,
+                        rope_fn=self.feat_rope,
+                        attention_mask=attention_mask,
+                        deterministic=deterministic,
+                    )
+
+                x = checkpoint(_block_forward, x, use_reentrant=False)
+            else:
+                x = block(
+                    x,
+                    rope_fn=self.feat_rope,
+                    attention_mask=attention_mask,
+                    deterministic=deterministic,
+                )
 
         x = x[:, prefix_len + model_mode_offset :]
 
-        decoder_logits = None
-        if decoder_step_active is not None:
-            active = decoder_step_active
-            if isinstance(active, torch.Tensor):
-                active = bool(active.detach().item())
-            if active:
-                hidden = F.gelu(x @ self.proj_kernel + self.proj_bias, approximate="tanh")
+        with torch.amp.autocast("cuda", enabled=False):
+            decoder_logits = None
+            if decoder_step_active is not None:
+                x_f32 = x.float()
+                hidden = F.gelu(x_f32 @ self.proj_kernel + self.proj_bias, approximate="tanh")
                 decoder_logits = hidden @ self.unembed_kernel + self.unembed_bias
-            else:
-                decoder_logits = torch.zeros(
-                    *x.shape[:2], self.vocab_size, device=x.device, dtype=x.dtype
-                )
-
-        return self.final_layer(x), decoder_logits
+            output = self.final_layer(x.float())
+        return output, decoder_logits
 
 
 def ELF_B(**kwargs) -> ELF:
@@ -441,5 +504,6 @@ def build_elf_from_config(config, text_encoder_dim: int, vocab_size: int) -> ELF
         vocab_size=vocab_size,
         num_model_mode_tokens=config.num_model_mode_tokens,
         bottleneck_dim=config.bottleneck_dim,
-        use_self_cond_proj=config.self_cond_prob > 0,
+        use_self_cond_proj=True,
+        gradient_checkpointing=getattr(config, "gradient_checkpointing", False),
     )
